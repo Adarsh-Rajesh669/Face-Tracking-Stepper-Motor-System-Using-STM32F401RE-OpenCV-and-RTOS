@@ -13,19 +13,39 @@
   * in the root directory of this software component.
   * If no LICENSE file comes with this software, it is provided AS-IS.
   *
-  ******************************************************************************
-  */
-/* USER CODE END Header */
+  *****************************************************************************
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include <string.h>
+#include <stdio.h>
+#include "cmsis_os.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* Stepper pin */
+#define IN1 GPIO_PIN_0   // PA0
+#define IN2 GPIO_PIN_1   // PA1
+#define IN3 GPIO_PIN_4   // PA4
+#define IN4 GPIO_PIN_0   // PB0
+#define PORT1 GPIOA
+#define PORT2 GPIOB
 
+#define DHT11_PORT GPIOC
+#define DHT11_PIN  GPIO_PIN_1
 /* USER CODE END Includes */
+typedef enum {
+    CMD_NONE = 0,
+    CMD_LEFT,
+    CMD_RIGHT,
+    CMD_CENTER
+} StepCmd_t;
 
-/* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+static QueueHandle_t xCmdQueue;
+//TaskHandle_t xStepperTaskHandle= NULL;
 
 /* USER CODE END PTD */
 
@@ -42,6 +62,13 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart2;
 
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 
 /* USER CODE END PV */
@@ -50,44 +77,30 @@ UART_HandleTypeDef huart2;
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
+void StartDefaultTask(void *argument);
+
 /* USER CODE BEGIN PFP */
-#define IN1 GPIO_PIN_0   // PA0
-#define IN2 GPIO_PIN_1   // PA1
-#define IN3 GPIO_PIN_4   // PA4
-#define IN4 GPIO_PIN_0   // PB0
+/* DWT microsecond delay */
+void DWT_Delay_Init(void);
+void delay_us(uint32_t us);
 
-#define PORT1 GPIOA
-#define PORT2 GPIOB
+/* DHT11 functions */
+void DHT11_SetPinOutput(void);
+void DHT11_SetPinInput(void);
+void DHT11_Start(void);
+uint8_t DHT11_Check_Response(void);
+uint8_t DHT11_Read(void);
 
-uint8_t rx_buf[20];  // Buffer for UART reception
+/* Stepper helpers */
+static void stepMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+static void rotateRight(int steps);
+static void rotateLeft(int steps);
 
+/* Tasks */
+void vUARTTask(void *pvParameters);
+void vStepperTask(void *pvParameters);
+void vDHT11Task(void *pvParameters);
 
-// Step function
-void stepMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-    HAL_GPIO_WritePin(PORT1, IN1, a);
-    HAL_GPIO_WritePin(PORT1, IN2, b);
-    HAL_GPIO_WritePin(PORT1, IN3, c);
-    HAL_GPIO_WritePin(PORT2, IN4, d);
-    HAL_Delay(5);  // 5 ms delay
-}
-
-void rotateRight(int steps) {
-    for (int i = 0; i < steps; i++) {
-        stepMotor(1, 0, 0, 0);
-        stepMotor(0, 1, 0, 0);
-        stepMotor(0, 0, 1, 0);
-        stepMotor(0, 0, 0, 1);
-    }
-}
-
-void rotateLeft(int steps) {
-    for (int i = 0; i < steps; i++) {
-        stepMotor(0, 0, 0, 1);
-        stepMotor(0, 0, 1, 0);
-        stepMotor(0, 1, 0, 0);
-        stepMotor(1, 0, 0, 0);
-    }
-}
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -126,29 +139,319 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-  HAL_UART_Receive_IT(&huart2, rx_buf, sizeof(rx_buf));
+
   /* USER CODE END 2 */
+
+  /* Init scheduler */
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  //defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+
+
+
+  DWT_Delay_Init();
+
+      xCmdQueue = xQueueCreate(4, sizeof(StepCmd_t));
+
+      xTaskCreate(vUARTTask, "UART", 256, NULL, tskIDLE_PRIORITY + 2, NULL);
+      xTaskCreate(vStepperTask, "STEPPER", 512, NULL, tskIDLE_PRIORITY + 3, NULL);
+      xTaskCreate(vDHT11Task, "DHT11", 384, NULL, tskIDLE_PRIORITY + 1, NULL);
+
+      vTaskStartScheduler();
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  while (1) {
-      HAL_UART_Receive(&huart2, rx_buf, sizeof(rx_buf), HAL_MAX_DELAY);
+  while (1)
+  {
+    /* USER CODE END WHILE */
 
-      if (strstr((char*)rx_buf, "RIGHT")) {
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);  // Turn on LED
-          rotateLeft(50);
-      } else if (strstr((char*)rx_buf, "LEFT")) {
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_SET);  // Turn on LED
-          rotateRight(50);
-      } else if (strstr((char*)rx_buf, "CENTER")) {
-          HAL_GPIO_WritePin(GPIOC, GPIO_PIN_1, GPIO_PIN_RESET); // Turn off LED
-
-      }
-
-      memset(rx_buf, 0, sizeof(rx_buf));
+    /* USER CODE BEGIN 3 */
   }
-
   /* USER CODE END 3 */
+}
+/* UART task: receive commands and push to queue */
+
+void vUARTTask(void *pvParameters)
+{
+    (void) pvParameters;
+    uint8_t rx_buf[32];
+    StepCmd_t cmd;
+    for (;;)
+    {
+        memset(rx_buf, 0, sizeof(rx_buf));
+        if (HAL_UART_Receive(&huart2, rx_buf, sizeof(rx_buf)-1, 2000) == HAL_OK)
+        {
+            if (strstr((char*)rx_buf, "RIGHT")) cmd = CMD_RIGHT;
+            else if (strstr((char*)rx_buf, "LEFT")) cmd = CMD_LEFT;
+            else if (strstr((char*)rx_buf, "CENTER")) cmd = CMD_CENTER;
+            else cmd = CMD_NONE;
+
+            if (cmd != CMD_NONE)
+            {
+                xQueueSend(xCmdQueue, &cmd, portMAX_DELAY);
+
+
+            }
+        }
+        else
+        {
+
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+}
+
+/* Stepper task: perform rotations on commands */
+/* Stepper task: continuous movement based on latest command */
+void vStepperTask(void *pvParameters)
+{
+    (void) pvParameters;
+    StepCmd_t cmd = CMD_NONE;
+    StepCmd_t newCmd;
+
+    for (;;)
+    {
+        // Check for new command (non-blocking with short timeout)
+        if (xQueueReceive(xCmdQueue, &newCmd, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+            cmd = newCmd;  // Update current command
+        }
+
+        // Execute one step based on current command
+        if (cmd == CMD_LEFT)
+        {
+            // Single step left
+        	stepMotor(1,0,0,0);
+        	stepMotor(0,1,0,0);
+        	stepMotor(0,0,1,0);
+        	stepMotor(0,0,0,1);
+        }
+        else if (cmd == CMD_RIGHT)
+        {
+            // Single step right
+
+            stepMotor(0,0,0,1);
+            stepMotor(0,0,1,0);
+            stepMotor(0,1,0,0);
+            stepMotor(1,0,0,0);
+        }
+        else if (cmd == CMD_CENTER)
+        {
+            // Stop - do nothing, motor stays idle
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        else
+        {
+            // No command - stop
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+}
+
+/* DHT11 task: read sensor and send over UART every ~2s */
+void vDHT11Task(void *pvParameters)
+{
+    (void) pvParameters;
+    char msg[64];
+    uint8_t Rh_byte1, Rh_byte2, Temp_byte1, Temp_byte2, Checksum;
+    uint16_t sum;
+    for (;;)
+    {
+        DHT11_Start();
+        if (DHT11_Check_Response())
+        {
+            Rh_byte1   = DHT11_Read();
+            Rh_byte2   = DHT11_Read();
+            Temp_byte1 = DHT11_Read();
+            Temp_byte2 = DHT11_Read();
+            Checksum   = DHT11_Read();
+
+            sum = (uint16_t)Rh_byte1 + (uint16_t)Rh_byte2 + (uint16_t)Temp_byte1 + (uint16_t)Temp_byte2;
+            if (sum == Checksum)
+            {
+                snprintf(msg, sizeof(msg), "DHT11: Temp=%dC Hum=%d%%\r\n", Temp_byte1, Rh_byte1);
+            }
+            else
+            {
+                snprintf(msg, sizeof(msg), "DHT11: checksum error\r\n");
+            }
+        }
+        else
+        {
+            snprintf(msg, sizeof(msg), "DHT11: no response\r\n");
+        }
+        HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+}
+
+/* Stepper functions */
+static void stepMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d)
+{
+    HAL_GPIO_WritePin(PORT1, IN1, a ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(PORT1, IN2, b ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(PORT1, IN3, c ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(PORT2, IN4, d ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    vTaskDelay(pdMS_TO_TICKS(5));
+}
+
+static void rotateRight(int steps)
+{
+    for (int i = 0; i < steps; i++)
+    {
+        stepMotor(1,0,0,0);
+        stepMotor(0,1,0,0);
+        stepMotor(0,0,1,0);
+        stepMotor(0,0,0,1);
+    }
+}
+
+static void rotateLeft(int steps)
+{
+    for (int i = 0; i < steps; i++)
+    {
+        stepMotor(0,0,0,1);
+        stepMotor(0,0,1,0);
+        stepMotor(0,1,0,0);
+        stepMotor(1,0,0,0);
+    }
+}
+
+/* DWT microsecond delay */
+void DWT_Delay_Init(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+
+void delay_us(uint32_t us)
+{
+    uint32_t clk_cycle_start = DWT->CYCCNT;
+    uint32_t cycles = (SystemCoreClock / 1000000UL) * us;
+
+    while ((DWT->CYCCNT - clk_cycle_start) < cycles)
+    {
+        taskYIELD();   // ← allow other tasks to run
+    }
+}
+
+
+/* DHT11 low-level */
+void DHT11_SetPinOutput(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = DHT11_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(DHT11_PORT, &GPIO_InitStruct);
+}
+
+void DHT11_SetPinInput(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin = DHT11_PIN;
+    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(DHT11_PORT, &GPIO_InitStruct);
+}
+
+void DHT11_Start(void)
+{
+    DHT11_SetPinOutput();
+    HAL_GPIO_WritePin(DHT11_PORT, DHT11_PIN, GPIO_PIN_RESET);
+    HAL_Delay(18);
+    HAL_GPIO_WritePin(DHT11_PORT, DHT11_PIN, GPIO_PIN_SET);
+    delay_us(30);
+    DHT11_SetPinInput();
+}
+
+uint8_t DHT11_Check_Response(void)
+{
+    uint8_t response = 0;
+    uint32_t timeout = 0;
+
+    timeout = 0;
+    while (HAL_GPIO_ReadPin(DHT11_PORT, DHT11_PIN) == GPIO_PIN_SET)
+    {
+        delay_us(1);
+        if (++timeout > 100) return 0;
+    }
+
+    timeout = 0;
+    while (HAL_GPIO_ReadPin(DHT11_PORT, DHT11_PIN) == GPIO_PIN_RESET)
+    {
+        delay_us(1);
+        if (++timeout > 200) return 0;
+    }
+
+    timeout = 0;
+    while (HAL_GPIO_ReadPin(DHT11_PORT, DHT11_PIN) == GPIO_PIN_SET)
+    {
+        delay_us(1);
+        if (++timeout > 200) return 0;
+    }
+
+    response = 1;
+    return response;
+}
+
+uint8_t DHT11_Read(void)
+{
+    uint8_t i = 0;
+    uint8_t result = 0;
+    uint32_t timeout;
+
+    for (i = 0; i < 8; i++)
+    {
+        timeout = 0;
+        while (HAL_GPIO_ReadPin(DHT11_PORT, DHT11_PIN) == GPIO_PIN_RESET)
+        {
+            delay_us(1);
+            if (++timeout > 200) return 0;
+        }
+
+        delay_us(40);
+        if (HAL_GPIO_ReadPin(DHT11_PORT, DHT11_PIN) == GPIO_PIN_SET)
+        {
+            result |= (1 << (7 - i));
+            timeout = 0;
+            while (HAL_GPIO_ReadPin(DHT11_PORT, DHT11_PIN) == GPIO_PIN_SET)
+            {
+                delay_us(1);
+                if (++timeout > 200) break;
+            }
+        }
+    }
+    return result;
 }
 
 /**
@@ -279,6 +582,24 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE END 4 */
 
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
+
 /**
   * @brief  This function is executed in case of error occurrence.
   * @retval None
@@ -286,7 +607,6 @@ static void MX_GPIO_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
