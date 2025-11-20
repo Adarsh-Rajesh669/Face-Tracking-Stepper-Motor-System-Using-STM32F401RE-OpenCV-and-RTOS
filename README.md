@@ -21,7 +21,8 @@ This project demonstrates a real-time face-tracking system by integrating comput
 
 - STM32F401RE Nucleo Board  
 - Stepper Motor (28BYJ-48)  
-- Stepper Motor Driver (ULN2003)    
+- Stepper Motor Driver (ULN2003)
+- DHT111 Sensor
 - USB cable for UART communication  
 ---
 
